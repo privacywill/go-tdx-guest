@@ -40,6 +40,8 @@ const (
 	IocTdxGetReport = iocTdxWithoutNrWithoutSize | (unsafe.Sizeof(TdxReportReq{}) << iocSizeshift) | (0x1 << iocNrshift)
 	// IocTdxGetQuote is the ioctl command for getting an attestation quote.
 	IocTdxGetQuote = iocTdxWithoutNrWithoutSize | (unsafe.Sizeof(TdxQuoteReqABI{}) << iocSizeshift) | (0x2 << iocNrshift)
+	// IocTdxExtendRtmr is the ioctl command for extend rtmr.
+	IocTdxExtendRtmr = iocTdxWithoutNrWithoutSize | (unsafe.Sizeof(TdxExtendRtmrReq{}) << iocSizeshift) | (0x3 << iocNrshift)
 	// TdReportDataSize is a constant for TDX ReportData size
 	TdReportDataSize = 64
 	// TdReportSize is a constant for TDX Report size
@@ -54,6 +56,8 @@ const (
 	GetQuoteReq = 0
 	// GetQuoteResp is a constant for report response
 	GetQuoteResp = 1
+	// TdRtmrDataSize is a constant for TDX Extend RTMR size
+	TdRtmrDataSize = 48
 )
 
 // EsResult is the status code type for Linux's GHCB communication results.
@@ -174,4 +178,11 @@ type BinaryConversion interface {
 // object to allow its representation to pass the ABI boundary.
 type BinaryConvertible interface {
 	ABI() BinaryConversion
+}
+
+// TdxExtendRtmrReq is Linux's tdx-guest ABI for TDX Extend RTMR. The
+// types here enhance runtime safety when using Ioctl as an interface.
+type TdxExtendRtmrReq struct {
+	Data  [TdRtmrDataSize]byte
+	Index uint8
 }

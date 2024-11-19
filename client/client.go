@@ -156,3 +156,25 @@ func fallbackToDeviceForRawQuote(reportData [64]byte) ([]uint8, error) {
 func init() {
 	logger.Init("", false, false, os.Stdout)
 }
+
+func ExtendRtmrDigest(d Device, rtmr int, digest []byte) error {
+	if len(digest) != 48 {
+		return fmt.Errorf("sha384 digest should be 48 bytes")
+	}
+	if rtmr > 3 || rtmr < 0 {
+		return fmt.Errorf("index can only be 0-3")
+	}
+	req := labi.TdxExtendRtmrReq{
+		Data:  [labi.TdRtmrDataSize]byte{},
+		Index: uint8(rtmr),
+	}
+	copy(req.Data[:], digest[:])
+	result, err := d.Ioctl(labi.IocTdxExtendRtmr, &req)
+	if err != nil {
+		return err
+	}
+	if result != uintptr(labi.TdxAttestSuccess) {
+		return fmt.Errorf("unable to extend RTMR")
+	}
+	return nil
+}
