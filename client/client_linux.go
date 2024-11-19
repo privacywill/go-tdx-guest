@@ -97,6 +97,12 @@ func (d *LinuxDevice) Ioctl(command uintptr, req any) (uintptr, error) {
 			return 0, errno
 		}
 		return result, nil
+	case *labi.TdxExtendRtmrReq:
+		result, _, errno := unix.Syscall(unix.SYS_IOCTL, uintptr(d.fd), command, uintptr(unsafe.Pointer(req.(*labi.TdxExtendRtmrReq))))
+		if errno != 0 {
+			return 0, errno
+		}
+		return result, nil
 	}
 	return 0, fmt.Errorf("unexpected request value: %v", req)
 }
