@@ -32,6 +32,7 @@ import (
 	"net/url"
 	"os"
 	"reflect"
+	"strings"
 	"time"
 
 	"github.com/google/go-tdx-guest/abi"
@@ -91,6 +92,8 @@ var (
 	ErrTcbInfoNil = errors.New("tcbInfo is empty in collaterals")
 	// ErrQeIdentityNil error returned when QeIdentity response structure is missing
 	ErrQeIdentityNil = errors.New("QeIdentity is empty in collaterals")
+	// ErrMissingPckExt error returned when pckCertExtensions is missing
+	ErrMissingPckExt = errors.New("missing PCK certificate's extension from SGX PCK Certificate")
 	// ErrMissingPCKCrlSigningCert error returned when signing certificate is missing in issuer chain of PCK CRL
 	ErrMissingPCKCrlSigningCert = errors.New("missing signing certificate in the issuer chain of PCK CRL")
 	// ErrMissingPCKCrlRootCert error returned when root certificate is missing in issuer chain of PCK CRL
@@ -139,8 +142,10 @@ var (
 	ErrRootCaCertExpired = errors.New("root CA certificate in PCK certificate chain has expired")
 	// ErrIntermediateCaCertExpired error returned when Intermediate CA certificate has expired
 	ErrIntermediateCaCertExpired = errors.New("intermediate CA certificate in PCK certificate chain has expired")
-	// ErrTcbStatus error returned when TCB status is out of date
-	ErrTcbStatus = errors.New("unable to find latest status of TCB, it is now OutOfDate")
+	// ErrTdxTcbStatus error returned when TDX TCB status is out of date
+	ErrTdxTcbStatus = errors.New("unable to find latest status of TDX TCB, it is now OutOfDate")
+	// ErrEnclaveTcbStatus error returned when Enclave TCB status is out of date
+	ErrEnclaveTcbStatus = errors.New("unable to find latest status of Enclave TCB, it is now OutOfDate")
 	// ErrCertNil error returned when certificate is not provided
 	ErrCertNil = errors.New("certificate is nil")
 	// ErrParentCertNil error returned when parent certificate is not provided
@@ -153,23 +158,20 @@ const (
 	tcbInfoVersion    = 3.0
 	qeIdentityVersion = 2.0
 
-	rootCertPhrase                 = "Intel SGX Root CA"
-	intermediateCertPhrase         = "Intel SGX PCK Platform CA"
-	pckCertPhrase                  = "Intel SGX PCK Certificate"
-	processorIssuer                = "Intel SGX PCK Processor CA"
-	processorIssuerID              = "processor"
-	platformIssuer                 = "Intel SGX PCK Platform CA"
-	platformIssuerID               = "platform"
-	sgxPckCrlIssuerChainPhrase     = "Sgx-Pck-Crl-Issuer-Chain"
-	sgxQeIdentityIssuerChainPhrase = "Sgx-Enclave-Identity-Issuer-Chain"
-	tcbInfoIssuerChainPhrase       = "Tcb-Info-Issuer-Chain"
-	tcbInfoPhrase                  = "tcbInfo"
-	enclaveIdentityPhrase          = "enclaveIdentity"
-	certificateType                = "CERTIFICATE"
-	tcbInfoID                      = "TDX"
-	qeIdentityID                   = "TD_QE"
-	tcbSigningPhrase               = "Intel SGX TCB Signing"
-	tcbInfoTdxModuleIDPrefix       = "TDX_"
+	rootCertPhrase           = "Intel SGX Root CA"
+	intermediateCertPhrase   = "Intel SGX PCK Platform CA"
+	pckCertPhrase            = "Intel SGX PCK Certificate"
+	processorIssuer          = "Intel SGX PCK Processor CA"
+	processorIssuerID        = "processor"
+	platformIssuer           = "Intel SGX PCK Platform CA"
+	platformIssuerID         = "platform"
+	tcbInfoPhrase            = "tcbInfo"
+	enclaveIdentityPhrase    = "enclaveIdentity"
+	certificateType          = "CERTIFICATE"
+	tcbInfoID                = "TDX"
+	qeIdentityID             = "TD_QE"
+	tcbSigningPhrase         = "Intel SGX TCB Signing"
+	tcbInfoTdxModuleIDPrefix = "TDX_"
 )
 
 // Options represents verification options for a TDX attestation quote.
@@ -181,8 +183,8 @@ type Options struct {
 	GetCollateral bool
 	// Getter takes a URL and returns the body of its contents. By default uses http.Get and returns the header and body
 	Getter trust.HTTPSGetter
-	// Now is the time at which to verify the validity of certificates and collaterals. If unset, uses time.Now().
-	Now time.Time
+	// Now is a time set at which to verify the validity of certificates and collaterals. If unset, uses defaultTimeset().
+	Now *TimeSet
 	// TrustedRoots specifies the root CertPool to trust when verifying PCK certificate chain.
 	// If nil, embedded certificate will be used
 	TrustedRoots *x509.CertPool
@@ -192,11 +194,30 @@ type Options struct {
 	pckCertExtensions *pcs.PckExtensions
 }
 
+// TimeSet holds a set of time instances to ensure accurate timing comparison.
+type TimeSet struct {
+	PckCertChain time.Time
+	TcbInfo      time.Time
+	QeIdentity   time.Time
+	PckCrl       time.Time
+	RootCaCrl    time.Time
+}
+
+func defaultTimeSet() *TimeSet {
+	return &TimeSet{
+		PckCertChain: time.Now(),
+		TcbInfo:      time.Now(),
+		QeIdentity:   time.Now(),
+		PckCrl:       time.Now(),
+		RootCaCrl:    time.Now(),
+	}
+}
+
 // DefaultOptions returns a useful default verification option setting
 func DefaultOptions() *Options {
 	return &Options{
 		Getter: trust.DefaultHTTPSGetter(),
-		Now:    time.Now(),
+		Now:    defaultTimeSet(),
 	}
 }
 
@@ -353,7 +374,7 @@ func getPckCrl(ca string, getter trust.HTTPSGetter, collateral *Collateral) erro
 	if err != nil {
 		return CRLUnavailableErr{multierr.Append(err, errors.New("could not fetch PCK CRL"))}
 	}
-	pckCrlIntermediateCert, pckCrlRootCert, err := headerToIssuerChain(header, sgxPckCrlIssuerChainPhrase)
+	pckCrlIntermediateCert, pckCrlRootCert, err := headerToIssuerChain(header, pcs.SgxPckCrlIssuerChainPhrase)
 	if err != nil {
 		return err
 	}
@@ -378,7 +399,7 @@ func getTcbInfo(fmspc string, getter trust.HTTPSGetter, collateral *Collateral) 
 		}
 	}
 
-	tcbInfoIntermediateCert, tcbInfoRootCert, err := headerToIssuerChain(header, tcbInfoIssuerChainPhrase)
+	tcbInfoIntermediateCert, tcbInfoRootCert, err := headerToIssuerChain(header, pcs.TcbInfoIssuerChainPhrase)
 	if err != nil {
 		return &trust.AttestationRecreationErr{
 			Msg: err.Error(),
@@ -414,7 +435,7 @@ func getQeIdentity(getter trust.HTTPSGetter, collateral *Collateral) error {
 		}
 	}
 
-	qeIdentityIntermediateCert, qeIdentityRootCert, err := headerToIssuerChain(header, sgxQeIdentityIssuerChainPhrase)
+	qeIdentityIntermediateCert, qeIdentityRootCert, err := headerToIssuerChain(header, pcs.SgxQeIdentityIssuerChainPhrase)
 	if err != nil {
 		return &trust.AttestationRecreationErr{
 			Msg: err.Error(),
@@ -504,35 +525,35 @@ func checkCollateralExpiration(collateral *Collateral, options *Options) error {
 	tcbInfo := collateral.TdxTcbInfo.TcbInfo
 	qeIdentity := collateral.QeIdentity.EnclaveIdentity
 
-	if currentTime.After(tcbInfo.NextUpdate) {
+	if currentTime.TcbInfo.After(tcbInfo.NextUpdate) {
 		return ErrTcbInfoExpired
 	}
-	if currentTime.After(qeIdentity.NextUpdate) {
+	if currentTime.QeIdentity.After(qeIdentity.NextUpdate) {
 		return ErrQeIdentityExpired
 	}
-	if currentTime.After(collateral.TcbInfoIssuerIntermediateCertificate.NotAfter) {
+	if currentTime.TcbInfo.After(collateral.TcbInfoIssuerIntermediateCertificate.NotAfter) {
 		return ErrTcbInfoSigningCertExpired
 	}
-	if currentTime.After(collateral.TcbInfoIssuerRootCertificate.NotAfter) {
+	if currentTime.TcbInfo.After(collateral.TcbInfoIssuerRootCertificate.NotAfter) {
 		return ErrTcbInfoRootCertExpired
 	}
-	if currentTime.After(collateral.QeIdentityIssuerRootCertificate.NotAfter) {
+	if currentTime.QeIdentity.After(collateral.QeIdentityIssuerRootCertificate.NotAfter) {
 		return ErrQeIdentityRootCertExpired
 	}
-	if currentTime.After(collateral.QeIdentityIssuerIntermediateCertificate.NotAfter) {
+	if currentTime.QeIdentity.After(collateral.QeIdentityIssuerIntermediateCertificate.NotAfter) {
 		return ErrQeIdentitySigningCertExpired
 	}
 	if options.CheckRevocations {
-		if currentTime.After(collateral.RootCaCrl.NextUpdate) {
+		if currentTime.RootCaCrl.After(collateral.RootCaCrl.NextUpdate) {
 			return ErrRootCaCrlExpired
 		}
-		if currentTime.After(collateral.PckCrl.NextUpdate) {
+		if currentTime.PckCrl.After(collateral.PckCrl.NextUpdate) {
 			return ErrPCKCrlExpired
 		}
-		if currentTime.After(collateral.PckCrlIssuerIntermediateCertificate.NotAfter) {
+		if currentTime.PckCrl.After(collateral.PckCrlIssuerIntermediateCertificate.NotAfter) {
 			return ErrPCKCrlSigningCertExpired
 		}
-		if currentTime.After(collateral.PckCrlIssuerRootCertificate.NotAfter) {
+		if currentTime.PckCrl.After(collateral.PckCrlIssuerRootCertificate.NotAfter) {
 			return ErrPCKCrlRootCertExpired
 		}
 	}
@@ -543,13 +564,13 @@ func checkCollateralExpiration(collateral *Collateral, options *Options) error {
 func checkCertificateExpiration(chain *PCKCertificateChain, options *Options) error {
 	currentTime := options.Now
 	logger.V(1).Info("Checking expiration status of certificates")
-	if currentTime.After(chain.RootCertificate.NotAfter) {
+	if currentTime.PckCertChain.After(chain.RootCertificate.NotAfter) {
 		return ErrRootCaCertExpired
 	}
-	if currentTime.After(chain.IntermediateCertificate.NotAfter) {
+	if currentTime.PckCertChain.After(chain.IntermediateCertificate.NotAfter) {
 		return ErrIntermediateCaCertExpired
 	}
-	if currentTime.After(chain.PCKCertificate.NotAfter) {
+	if currentTime.PckCertChain.After(chain.PCKCertificate.NotAfter) {
 		return ErrPckLeafCertExpired
 	}
 	logger.V(1).Info("Certificates are up-to-date")
@@ -792,7 +813,7 @@ func verifyPCKCertificationChain(options *Options) error {
 	}
 	logger.V(1).Info("PCK Leaf Certificate verified successfully")
 
-	if _, err := pckCert.Verify(x509Options(options.TrustedRoots, intermediateCert, options.Now)); err != nil {
+	if _, err := pckCert.Verify(x509Options(options.TrustedRoots, intermediateCert, options.Now.PckCertChain)); err != nil {
 		return fmt.Errorf("error verifying PCK Certificate: %v (%v)", err, rootCert.IsCA)
 	}
 	logger.V(1).Info("PCK Certificate Chain verified successfully")
@@ -895,6 +916,13 @@ func isTdxTcbSvnHigherOrEqual(teeTcbSvn []byte, tdxTcbcomponents []pcs.TcbCompon
 	return true
 }
 
+// getMatchingTdxModuleTcbLevel performs additional TCB status evaluation for TDX module in case TEE TCB SVN at index 1 is greater or equal to 1.
+// It performs the following comparisons:
+//  1. Find a matching TDX Module Identity (in tdxModuleIdentities array of TCB Info) with its id set to "TDX_<version>" where <version> matches the value of TEE TCB SVN at index 1.
+//  2. For the selected TDX Module Identity, go over the sorted collection of TCB Levels (descending order) starting from the first item on the list
+//     and compare its isvsvn value to the TEE TCB SVN at index 0.
+//
+// If TEE TCB SVN at index 0 is greater or equal to its value, return the first TCB level as the matching level.
 func getMatchingTdxModuleTcbLevel(tcbInfoTdxModuleIdentities []pcs.TdxModuleIdentity, teeTcbSvn []byte) (*pcs.TcbLevel, error) {
 	tdxModuleVersion := []byte(teeTcbSvn[1:2])
 	tdxModuleIdentityID := tcbInfoTdxModuleIDPrefix + hex.EncodeToString(tdxModuleVersion)
@@ -914,6 +942,12 @@ func getMatchingTdxModuleTcbLevel(tcbInfoTdxModuleIdentities []pcs.TdxModuleIden
 	return nil, fmt.Errorf("could not find a TDX Module Identity (%q) matching the given TEE TDX version (%q)", tdxModuleIdentityID, tdxModuleVersion)
 }
 
+// getMatchingTcbLevel goes over TCB levels (descending order) retrieved from Intel PCS's TCB info and
+// perform the following comparisons:
+// 1. Compare all of the SGX TCB Comp SVNs retrieved from the SGX PCK Certificate are greater or equal to the corresponding values of SVNs in `sgxtcbcomponents` array of TCB Level.
+// 2. Compare PCESVN values retrieved from the SGX PCK certificate are greater or equal to the value in TCB level.
+// 3. Compare SVNs in TEE TCB SVN array retrieved from TD Report  are greater or equal to the corresponding values of SVNs in tdxtcbcomponents array of TCB Level.
+// If all checks pass, return the first TCB level as the matching level.
 func getMatchingTcbLevel(tcbLevels []pcs.TcbLevel, tdReport *pb.TDQuoteBody, pckCertPceSvn uint16, pckCertCPUSvnComponents []byte) (pcs.TcbLevel, error) {
 	for _, tcbLevel := range tcbLevels {
 		if isCPUSvnHigherOrEqual(pckCertCPUSvnComponents, tcbLevel.Tcb.SgxTcbcomponents) &&
@@ -925,47 +959,76 @@ func getMatchingTcbLevel(tcbLevels []pcs.TcbLevel, tdReport *pb.TDQuoteBody, pck
 	return pcs.TcbLevel{}, fmt.Errorf("no matching TCB level found")
 }
 
-func checkQeTcbStatus(tcbLevels []pcs.TcbLevel, isvsvn uint32) error {
+// readQeTcbStatus goes over Intel PCS's QE TCB results (descending order) and
+// find the first one that has ISVSVN that is lower or equal to the ISVSVN value from SGX Enclave Report.
+func readQeTcbStatus(tcbLevels []pcs.TcbLevel, isvsvn uint32) (pcs.TcbLevel, error) {
 	for _, tcbLevel := range tcbLevels {
 		if tcbLevel.Tcb.Isvsvn <= isvsvn {
-			if tcbLevel.TcbStatus != pcs.TcbComponentStatusUpToDate {
-				return fmt.Errorf("TCB Status is not %q, found %q", pcs.TcbComponentStatusUpToDate, tcbLevel.TcbStatus)
-			}
-			return nil
+			return tcbLevel, nil
 		}
 	}
-	return ErrTcbStatus
+	return pcs.TcbLevel{}, fmt.Errorf("no matching QE TCB level found")
 }
 
-func checkTcbInfoTcbStatus(tcbInfo pcs.TcbInfo, tdQuoteBody *pb.TDQuoteBody, pckCertExtensions *pcs.PckExtensions) error {
+func checkQeTcbStatus(tcbLevels []pcs.TcbLevel, isvsvn uint32) error {
+	found, err := readQeTcbStatus(tcbLevels, isvsvn)
+	if err != nil {
+		return err
+	}
+
+	if found.TcbStatus == pcs.TcbComponentStatusOutOfDate {
+		return ErrEnclaveTcbStatus
+	}
+
+	if found.TcbStatus != pcs.TcbComponentStatusUpToDate {
+		return fmt.Errorf("QE TCB Status is not %q, found %q", pcs.TcbComponentStatusUpToDate, found.TcbStatus)
+	}
+
+	return nil
+}
+
+func readTcbInfoTcbStatus(tcbInfo pcs.TcbInfo, tdQuoteBody *pb.TDQuoteBody, pckCertExtensions *pcs.PckExtensions) (pcs.TcbLevel, error) {
 	tcbLevels := tcbInfo.TcbLevels
 	matchingTcbLevel, err := getMatchingTcbLevel(tcbLevels, tdQuoteBody, pckCertExtensions.TCB.PCESvn, pckCertExtensions.TCB.CPUSvnComponents)
 	if err != nil {
-		return err
+		return pcs.TcbLevel{}, err
 	}
 	logger.V(2).Info("Matching TCB Level found: ", matchingTcbLevel)
 
 	if tdQuoteBody.GetTeeTcbSvn()[1] > 0 {
 		matchingTdxModuleTcbLevel, err := getMatchingTdxModuleTcbLevel(tcbInfo.TdxModuleIdentities, tdQuoteBody.GetTeeTcbSvn())
 		if err != nil {
-			return err
+			return pcs.TcbLevel{}, err
 		}
 		logger.V(2).Info("Tdx Module TCB Status found: ", matchingTdxModuleTcbLevel.TcbStatus)
-		if matchingTdxModuleTcbLevel.TcbStatus != pcs.TcbComponentStatusUpToDate {
-			return fmt.Errorf("TDX Module TCB Status is not %q, found %q", pcs.TcbComponentStatusUpToDate, matchingTdxModuleTcbLevel.TcbStatus)
-		}
+		return *matchingTdxModuleTcbLevel, nil
 	}
 
 	logger.V(2).Info("TCB Status found: ", matchingTcbLevel.TcbStatus)
-	if matchingTcbLevel.TcbStatus != pcs.TcbComponentStatusUpToDate {
-		return fmt.Errorf("TCB Status is not %q, found %q", pcs.TcbComponentStatusUpToDate, matchingTcbLevel.TcbStatus)
+	return matchingTcbLevel, nil
+}
+
+func checkTcbInfoTcbStatus(tcbInfo pcs.TcbInfo, tdQuoteBody *pb.TDQuoteBody, pckCertExtensions *pcs.PckExtensions) error {
+	found, err := readTcbInfoTcbStatus(tcbInfo, tdQuoteBody, pckCertExtensions)
+	if err != nil {
+		return err
 	}
+
+	if found.TcbStatus == pcs.TcbComponentStatusOutOfDate {
+		return ErrTdxTcbStatus
+	}
+
+	if found.TcbStatus != pcs.TcbComponentStatusUpToDate {
+		return fmt.Errorf("TDX TCB Status is not %q, found %q", pcs.TcbComponentStatusUpToDate, found.TcbStatus)
+	}
+
 	return nil
 }
 
 func verifyTdQuoteBody(tdQuoteBody *pb.TDQuoteBody, tdQuoteBodyOptions *tdQuoteBodyOptions) error {
 	logger.V(2).Infof("FMSPC from PCK Certificate is %q, and FMSPC value from Intel PCS's reported TDX TCB info is %q", tdQuoteBodyOptions.pckCertExtensions.FMSPC, tdQuoteBodyOptions.tcbInfo.Fmspc)
-	if tdQuoteBodyOptions.pckCertExtensions.FMSPC != tdQuoteBodyOptions.tcbInfo.Fmspc {
+	// Converting FMSPCs to the same case and compare them in a memory-efficient way.
+	if !strings.EqualFold(tdQuoteBodyOptions.pckCertExtensions.FMSPC, tdQuoteBodyOptions.tcbInfo.Fmspc) {
 		return fmt.Errorf("FMSPC from PCK Certificate(%q) is not equal to FMSPC value from Intel PCS's reported TDX TCB info(%q)", tdQuoteBodyOptions.pckCertExtensions.FMSPC, tdQuoteBodyOptions.tcbInfo.Fmspc)
 	}
 
@@ -1133,7 +1196,7 @@ func tdxQeReportSignature(qeReport []byte, signature []byte, pckCert *x509.Certi
 	return nil
 }
 
-func verifyResponse(signingPhrase string, rootCertificate *x509.Certificate, signingCertificate *x509.Certificate, rawBody []byte, rawSignature string, crl *x509.RevocationList, options *Options) error {
+func verifyResponse(signingPhrase string, rootCertificate *x509.Certificate, signingCertificate *x509.Certificate, rawBody []byte, rawSignature string, crl *x509.RevocationList, options *Options, now time.Time) error {
 
 	logger.V(1).Info("Verifying root certificate in the issuer chain")
 	if err := validateCertificate(rootCertificate, rootCertificate, rootCertPhrase); err != nil {
@@ -1146,7 +1209,7 @@ func verifyResponse(signingPhrase string, rootCertificate *x509.Certificate, sig
 		return fmt.Errorf("unable to validate signing certificate in the issuer chain: %v", err)
 	}
 	logger.V(1).Info("Signing certificate verified successfully in the issuer chain")
-	if _, err := signingCertificate.Verify(x509Options(options.TrustedRoots, nil, options.Now)); err != nil {
+	if _, err := signingCertificate.Verify(x509Options(options.TrustedRoots, nil, now)); err != nil {
 		return fmt.Errorf("unable to verify signing certificate: %v", err)
 	}
 	logger.V(1).Info("Signing certificate successfully verified using trusted roots")
@@ -1209,7 +1272,7 @@ func verifyTCBinfo(options *Options) error {
 
 	logger.V(1).Info("Verifying TCB Info response")
 	if err := verifyResponse(tcbSigningPhrase, collateral.TcbInfoIssuerRootCertificate, collateral.TcbInfoIssuerIntermediateCertificate,
-		collateral.TcbInfoBody, signature, collateral.RootCaCrl, options); err != nil {
+		collateral.TcbInfoBody, signature, collateral.RootCaCrl, options, options.Now.TcbInfo); err != nil {
 		return fmt.Errorf("tcbInfo response verification failed: %v", err)
 	}
 
@@ -1236,7 +1299,7 @@ func verifyQeIdentity(options *Options) error {
 	}
 	logger.V(1).Info("Verifying QE Identity response")
 	if err := verifyResponse(tcbSigningPhrase, collateral.QeIdentityIssuerRootCertificate, collateral.QeIdentityIssuerIntermediateCertificate,
-		collateral.EnclaveIdentityBody, signature, collateral.RootCaCrl, options); err != nil {
+		collateral.EnclaveIdentityBody, signature, collateral.RootCaCrl, options, options.Now.QeIdentity); err != nil {
 		return fmt.Errorf("QeIdentity response verification failed: %v", err)
 	}
 
@@ -1301,6 +1364,38 @@ func TdxQuote(quote any, options *Options) error {
 	}
 }
 
+// SupportedTcbLevelsFromCollateral returns the matching TCB levels of TDX TCB and QE Identity respectively by checking collaterals.
+// It is the caller's responsibility to verify the quote before calling this function.
+func SupportedTcbLevelsFromCollateral(quote any, options *Options) (pcs.TcbLevel, pcs.TcbLevel, error) {
+	if options == nil {
+		return pcs.TcbLevel{}, pcs.TcbLevel{}, ErrOptionsNil
+	}
+	if err := verifyCollateral(options); err != nil {
+		return pcs.TcbLevel{}, pcs.TcbLevel{}, err
+	}
+
+	if options.pckCertExtensions == nil {
+		return pcs.TcbLevel{}, pcs.TcbLevel{}, ErrMissingPckExt
+	}
+
+	switch q := quote.(type) {
+	case *pb.QuoteV4:
+		var err error
+		foundTcbInfo, tcbErr := readTcbInfoTcbStatus(options.collateral.TdxTcbInfo.TcbInfo, q.GetTdQuoteBody(), options.pckCertExtensions)
+		if tcbErr != nil {
+			multierr.Combine(err, tcbErr)
+		}
+
+		foundQe, qeErr := readQeTcbStatus(options.collateral.QeIdentity.EnclaveIdentity.TcbLevels, q.GetSignedData().GetCertificationData().GetQeReportCertificationData().GetQeReport().GetIsvSvn())
+		if qeErr != nil {
+			multierr.Combine(err, qeErr)
+		}
+		return foundTcbInfo, foundQe, err
+	default:
+		return pcs.TcbLevel{}, pcs.TcbLevel{}, fmt.Errorf("unsupported quote type: %T", quote)
+	}
+}
+
 // tdxQuoteV4 verifies the QuoteV4 protobuf representation of an attestation quote's signature
 // based on the quote's SignatureAlgo, provided the certificate chain is valid.
 func tdxQuoteV4(quote *pb.QuoteV4, options *Options) error {
@@ -1344,8 +1439,8 @@ func tdxQuoteV4(quote *pb.QuoteV4, options *Options) error {
 	options.collateral = collateral
 	options.pckCertExtensions = exts
 	options.chain = chain
-	if options.Now.IsZero() {
-		options.Now = time.Now()
+	if options.Now == nil {
+		options.Now = defaultTimeSet()
 	}
 	return verifyEvidenceV4(quote, options)
 }

@@ -17,8 +17,10 @@ package verify
 import (
 	"crypto/x509"
 	"encoding/hex"
+	"errors"
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,6 +39,16 @@ var (
 	// Adjust futureTime to compare against so that the validity with respect to time fails.
 	futureTime = time.Date(2053, time.July, 1, 1, 0, 0, 0, time.UTC)
 )
+
+func testTimeSet(timestamp time.Time) *TimeSet {
+	return &TimeSet{
+		PckCertChain: timestamp,
+		TcbInfo:      timestamp,
+		QeIdentity:   timestamp,
+		PckCrl:       timestamp,
+		RootCaCrl:    timestamp,
+	}
+}
 
 func setTcbSvnValues(sgxSvn byte, tdxSvn byte, tdxTcbcomponents *[]pcs.TcbComponent, sgxTcbcomponents *[]pcs.TcbComponent) {
 	sgxComponents := *sgxTcbcomponents
@@ -117,7 +129,7 @@ func TestVerifyPckChainWithoutRevocation(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyEvidence(quote, &Options{CheckRevocations: false, GetCollateral: false, chain: pckChain, Now: currentTime}); err != nil {
+	if err := verifyEvidence(quote, &Options{CheckRevocations: false, GetCollateral: false, chain: pckChain, Now: testTimeSet(currentTime)}); err != nil {
 		t.Error(err)
 	}
 }
@@ -132,7 +144,7 @@ func TestNegativeVerifyPckChainWithoutRevocation(t *testing.T) {
 		t.Fatal(err)
 	}
 	wantErr := "error verifying PCK Certificate: x509: certificate has expired or is not yet valid: current time 2053-07-01T01:00:00Z is after 2029-09-20T13:20:31Z (true)"
-	if err := verifyEvidence(quote, &Options{CheckRevocations: false, GetCollateral: false, chain: pckChain, Now: futureTime}); err == nil || err.Error() != wantErr {
+	if err := verifyEvidence(quote, &Options{CheckRevocations: false, GetCollateral: false, chain: pckChain, Now: testTimeSet(futureTime)}); err == nil || err.Error() != wantErr {
 		t.Errorf("Certificates Expired: verifyEvidence() = %v. Want error: %v.", err, wantErr)
 	}
 }
@@ -148,7 +160,7 @@ func TestVerifyPckLeafCertificate(t *testing.T) {
 	}
 	pckLeafCert := pckChain.PCKCertificate
 	opts := &Options{CheckRevocations: false, GetCollateral: false, TrustedRoots: nil, chain: pckChain}
-	chains, err := pckLeafCert.Verify(x509Options(opts.TrustedRoots, pckChain.IntermediateCertificate, opts.Now))
+	chains, err := pckLeafCert.Verify(x509Options(opts.TrustedRoots, pckChain.IntermediateCertificate, currentTime))
 
 	if err != nil {
 		t.Fatal(err)
@@ -260,7 +272,7 @@ func TestNegativeValidateX509Certificate(t *testing.T) {
 }
 
 func TestRawQuoteVerifyWithoutCollateral(t *testing.T) {
-	options := &Options{CheckRevocations: false, GetCollateral: false, Now: currentTime}
+	options := &Options{CheckRevocations: false, GetCollateral: false, Now: testTimeSet(currentTime)}
 	if err := RawTdxQuote(testdata.RawQuote, options); err != nil {
 		t.Error(err)
 	}
@@ -278,7 +290,7 @@ func TestVerifyQuoteV4(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	options := &Options{CheckRevocations: false, GetCollateral: false, chain: pckChain, Now: currentTime}
+	options := &Options{CheckRevocations: false, GetCollateral: false, chain: pckChain, Now: testTimeSet(currentTime)}
 	if err := verifyQuote(quote, options); err != nil {
 		t.Error(err)
 	}
@@ -340,7 +352,7 @@ func TestNegativeVerification(t *testing.T) {
 			wantErr:     "unable to verify message digest using quote's signature and ecdsa attestation key",
 		},
 	}
-	options := &Options{CheckRevocations: false, GetCollateral: false, TrustedRoots: nil, Now: currentTime}
+	options := &Options{CheckRevocations: false, GetCollateral: false, TrustedRoots: nil, Now: testTimeSet(currentTime)}
 	rawQuote := make([]byte, len(testdata.RawQuote))
 
 	for _, tc := range tests {
@@ -426,7 +438,7 @@ func TestObtainAndVerifyCollateral(t *testing.T) {
 	ca := platformIssuerID
 	fmspcBytes := []byte{80, 128, 111, 0, 0, 0}
 	fmspc := hex.EncodeToString(fmspcBytes)
-	options := &Options{GetCollateral: true, CheckRevocations: true, Getter: getter, Now: currentTime}
+	options := &Options{GetCollateral: true, CheckRevocations: true, Getter: getter, Now: testTimeSet(currentTime)}
 	collateral, err := obtainCollateral(fmspc, ca, options)
 	if err != nil {
 		t.Fatal(err)
@@ -443,7 +455,7 @@ func TestNegativeObtainAndVerifyCollateral(t *testing.T) {
 	fmspcBytes := []byte{80, 128, 111, 0, 0, 0}
 	fmspc := hex.EncodeToString(fmspcBytes)
 
-	options := &Options{GetCollateral: true, CheckRevocations: true, Getter: getter, Now: futureTime}
+	options := &Options{GetCollateral: true, CheckRevocations: true, Getter: getter, Now: testTimeSet(futureTime)}
 	collateral, err := obtainCollateral(fmspc, ca, options)
 	if err != nil {
 		t.Fatal(err)
@@ -490,6 +502,18 @@ func TestVerifyUsingTcbInfoV4(t *testing.T) {
 	}
 	if err := verifyTdQuoteBody(quote.GetTdQuoteBody(), &tdQuoteBodyOptions{tcbInfo: tcbInfo, pckCertExtensions: ext}); err != nil {
 		t.Error(err)
+	}
+
+	// Convert fmspc value to uppercase.
+	tcbInfo.Fmspc = strings.ToUpper(tcbInfo.Fmspc)
+	if err := verifyTdQuoteBody(quote.GetTdQuoteBody(), &tdQuoteBodyOptions{tcbInfo: tcbInfo, pckCertExtensions: ext}); err != nil {
+		t.Errorf("verifyTdQuoteBody() failed with upppercased FMSPC value: %v", err)
+	}
+
+	// Convert fmspc value to lowercase.
+	tcbInfo.Fmspc = strings.ToLower(tcbInfo.Fmspc)
+	if err := verifyTdQuoteBody(quote.GetTdQuoteBody(), &tdQuoteBodyOptions{tcbInfo: tcbInfo, pckCertExtensions: ext}); err != nil {
+		t.Errorf("verifyTdQuoteBody() failed with lowercased FMSPC value: %v", err)
 	}
 }
 
@@ -673,8 +697,7 @@ func TestNegativeTcbInfoTcbStatusV4(t *testing.T) {
 
 	tcbInfo.TcbLevels[0].Tcb.Pcesvn = 0
 	tcbInfo.TcbLevels[0].TcbStatus = "OutOfDate"
-	wantErr = `TCB Status is not "UpToDate", found "OutOfDate"`
-	if err := checkTcbInfoTcbStatus(tcbInfo, quote.GetTdQuoteBody(), ext); err == nil || err.Error() != wantErr {
+	if gotErr, wantErr := checkTcbInfoTcbStatus(tcbInfo, quote.GetTdQuoteBody(), ext), ErrTdxTcbStatus; gotErr == nil || !errors.Is(gotErr, wantErr) {
 		t.Errorf("TCB status expired: checkTcbInfoTcbStatus() = %v. Want error %v", err, wantErr)
 	}
 }
@@ -699,15 +722,14 @@ func TestNegativeCheckQeStatusV4(t *testing.T) {
 	qeReport := quote.GetSignedData().GetCertificationData().GetQeReportCertificationData().GetQeReport()
 
 	qeIdentity.TcbLevels[0].Tcb.Isvsvn = 10
-	wantErr := "unable to find latest status of TCB, it is now OutOfDate"
+	wantErr := "no matching QE TCB level found"
 	if err := checkQeTcbStatus(qeIdentity.TcbLevels, qeReport.GetIsvSvn()); err == nil || err.Error() != wantErr {
 		t.Errorf("No matching TCB level: verifyUsingQeIdentity() = %v. Want error %v", err, wantErr)
 	}
 
 	qeIdentity.TcbLevels[0].Tcb.Isvsvn = 0
 	qeIdentity.TcbLevels[0].TcbStatus = "OutOfDate"
-	wantErr = `TCB Status is not "UpToDate", found "OutOfDate"`
-	if err := checkQeTcbStatus(qeIdentity.TcbLevels, qeReport.GetIsvSvn()); err == nil || err.Error() != wantErr {
+	if gotErr, wantErr := checkQeTcbStatus(qeIdentity.TcbLevels, qeReport.GetIsvSvn()), ErrEnclaveTcbStatus; gotErr == nil || !errors.Is(gotErr, wantErr) {
 		t.Errorf("TCB status expired: verifyUsingQeIdentity() = %v. Want error %v", err, wantErr)
 	}
 }
@@ -746,7 +768,7 @@ func TestValidateCRL(t *testing.T) {
 
 func TestNegativeRawQuoteVerifyWithCollateral(t *testing.T) {
 	getter := testcases.TestGetter
-	options := &Options{CheckRevocations: true, GetCollateral: true, Getter: getter, Now: currentTime}
+	options := &Options{CheckRevocations: true, GetCollateral: true, Getter: getter, Now: testTimeSet(currentTime)}
 	wantErr := "TDX TCB info reported by Intel PCS failed TCB status check: no matching TCB level found"
 	// Due to updated SVN values in the sample response, it will result in TCB status failure,
 	// when compared to the TD Quote Body's TeeTcbSvn value.
@@ -761,5 +783,110 @@ func TestNegativeCheckRevocation(t *testing.T) {
 	wantErr := "unable to check for certificate revocation as GetCollateral parameter in the options is set to false"
 	if err := RawTdxQuote(testdata.RawQuote, options); err == nil || err.Error() != wantErr {
 		t.Errorf("Check Revocation Without GetCollateral: RawTdxQuote() = %v. Want error %v", err, wantErr)
+	}
+}
+
+func TestSupportedTcbLevelsFromCollateral(t *testing.T) {
+	getter := testcases.TestGetter
+
+	fmspcBytes := []byte{80, 128, 111, 0, 0, 0}
+	fmspc := hex.EncodeToString(fmspcBytes)
+
+	ca := platformIssuerID
+	collateral, err := obtainCollateral(fmspc, ca, &Options{Getter: getter})
+	if err != nil {
+		t.Fatal(err)
+	}
+	tcbInfo := collateral.TdxTcbInfo.TcbInfo
+	// Due to updated SVN values in the sample response, it will result in TCB status failure,
+	// when compared to the TD Quote Body's TeeTcbSvn value.
+	// For the purpose of testing, converting all SVNs value to 0
+	setTcbSvnValues(0, 0, &tcbInfo.TcbLevels[0].Tcb.TdxTcbcomponents, &tcbInfo.TcbLevels[0].Tcb.SgxTcbcomponents)
+
+	anyQuote, err := abi.QuoteToProto(testdata.RawQuote)
+	if err != nil {
+		t.Fatal(err)
+	}
+	quote, ok := anyQuote.(*pb.QuoteV4)
+	if !ok {
+		t.Fatal("quote is not a QuoteV4")
+	}
+
+	chain, err := extractChainFromQuote(anyQuote)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ext, err := pcs.PckCertificateExtensions(chain.PCKCertificate)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	testCases := []struct {
+		name     string
+		options  *Options
+		wantPass bool
+	}{
+		{
+			name: "success",
+			options: &Options{
+				GetCollateral:     true,
+				Now:               testTimeSet(currentTime),
+				chain:             chain,
+				collateral:        collateral,
+				pckCertExtensions: ext,
+			},
+			wantPass: true,
+		},
+		{
+			name:     "failed with nil options",
+			options:  nil,
+			wantPass: false,
+		},
+		{
+			name: "failed with wrong collateral",
+			options: &Options{
+				GetCollateral:     true,
+				Now:               testTimeSet(currentTime),
+				chain:             chain,
+				collateral:        &Collateral{},
+				pckCertExtensions: ext,
+			},
+			wantPass: false,
+		},
+		{
+			name: "failed with nil pckCertExtensions",
+			options: &Options{
+				GetCollateral:     true,
+				Now:               testTimeSet(currentTime),
+				chain:             chain,
+				collateral:        &Collateral{},
+				pckCertExtensions: nil,
+			},
+			wantPass: false,
+		},
+	}
+
+	for _, tc := range testCases {
+		t.Run(tc.name, func(t *testing.T) {
+			tdx, qe, err := SupportedTcbLevelsFromCollateral(quote, tc.options)
+			if gotPass := err == nil; gotPass != tc.wantPass {
+				t.Errorf("SupportedTcbLevelsFromCollateral() failed, got pass %v, but want %v", gotPass, tc.wantPass)
+			}
+			if tc.wantPass {
+				if got, want := tdx.TcbStatus, pcs.TcbComponentStatusUpToDate; got != want {
+					t.Errorf("SupportedTcbLevelsFromCollateral() didn't return expected TDX TCB status, got: %v, but want: %v", got, want)
+				}
+				if _, err := time.Parse(time.RFC3339, tdx.TcbDate); err != nil {
+					t.Errorf("SupportedTcbLevelsFromCollateral() didn't return expected TDX TCB Date format, got: %v, but want RFC3339 format", tdx.TcbDate)
+				}
+				if got, want := qe.TcbStatus, pcs.TcbComponentStatusUpToDate; got != want {
+					t.Errorf("SupportedTcbLevelsFromCollateral() didn't return expected QE TCB status, got: %v, but want: %v", got, want)
+				}
+				if _, err := time.Parse(time.RFC3339, qe.TcbDate); err != nil {
+					t.Errorf("SupportedTcbLevelsFromCollateral() didn't return expected QE TCB Date format, got: %v, but want RFC3339 format", qe.TcbDate)
+				}
+			}
+		})
 	}
 }
