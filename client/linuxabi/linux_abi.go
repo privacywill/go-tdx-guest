@@ -41,7 +41,7 @@ const (
 	// IocTdxGetQuote is the ioctl command for getting an attestation quote.
 	IocTdxGetQuote = iocTdxWithoutNrWithoutSize | (unsafe.Sizeof(TdxQuoteReqABI{}) << iocSizeshift) | (0x4 << iocNrshift)
 	// IocTdxExtendRtmr is the ioctl command for extend rtmr.
-	IocTdxExtendRtmr = ((iocRead) << iocDirshift) | (unsafe.Sizeof(TdxExtendRtmrReq{}) << iocSizeshift) | (iocTypeTdxGuestReq << iocTypeshift) | (0x3 << iocNrshift)
+	IocTdxExtendRtmr = ((iocWrite) << iocDirshift) | (unsafe.Sizeof(TdxExtendRtmrReq{}) << iocSizeshift) | (iocTypeTdxGuestReq << iocTypeshift) | (0x3 << iocNrshift)
 	// TdReportDataSize is a constant for TDX ReportData size
 	TdReportDataSize = 64
 	// TdReportSize is a constant for TDX Report size
